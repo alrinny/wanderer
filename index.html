@@ -1,0 +1,1531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>🗺 Wanderer — Infinite Pixel World</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0a0a2a;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    canvas#world {
+      display: block;
+      width: 100%;
+      height: 100%;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+    #loading {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #0a0a2a;
+      color: #aab;
+      font-family: monospace;
+      z-index: 100;
+      transition: opacity 0.5s;
+    }
+    #loading h1 {
+      font-size: 28px;
+      color: #fff;
+      margin-bottom: 10px;
+    }
+    #loading p {
+      font-size: 14px;
+      opacity: 0.7;
+    }
+    #loading .hint {
+      margin-top: 20px;
+      font-size: 12px;
+      opacity: 0.4;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <h1>🗺 Wanderer</h1>
+    <p>Generating world...</p>
+    <p class="hint">Press Esc for help</p>
+  </div>
+  <canvas id="world"></canvas>
+
+  <script>
+// terrain.js — Procedural terrain generation using simplex-like noise
+// Generates infinite terrain tiles: grass, forest, mountain, water, sand, road, village
+
+// ===== Noise functions (simplified Perlin-like) =====
+class SeededRandom {
+  constructor(seed) {
+    this.seed = seed;
+  }
+  next() {
+    this.seed = (this.seed * 16807 + 0) % 2147483647;
+    return (this.seed - 1) / 2147483646;
+  }
+}
+
+// Simple hash for 2D coordinates
+function hash2D(x, y, seed) {
+  let h = seed;
+  h ^= x * 374761393;
+  h ^= y * 668265263;
+  h = Math.imul(h, 1274126177);
+  h ^= h >> 16;
+  h = Math.imul(h, 1274126177);
+  h ^= h >> 16;
+  return h;
+}
+
+function hashFloat(x, y, seed) {
+  return (hash2D(x, y, seed) & 0x7fffffff) / 0x7fffffff;
+}
+
+// Value noise with smoothstep interpolation
+function smoothstep(t) {
+  return t * t * (3 - 2 * t);
+}
+
+function valueNoise(x, y, seed) {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  const fx = smoothstep(x - ix);
+  const fy = smoothstep(y - iy);
+
+  const v00 = hashFloat(ix, iy, seed);
+  const v10 = hashFloat(ix + 1, iy, seed);
+  const v01 = hashFloat(ix, iy + 1, seed);
+  const v11 = hashFloat(ix + 1, iy + 1, seed);
+
+  const vx0 = v00 + (v10 - v00) * fx;
+  const vx1 = v01 + (v11 - v01) * fx;
+
+  return vx0 + (vx1 - vx0) * fy;
+}
+
+// Fractal Brownian Motion
+function fbm(x, y, seed, octaves = 4, lacunarity = 2.0, gain = 0.5) {
+  let value = 0;
+  let amplitude = 1;
+  let frequency = 1;
+  let maxValue = 0;
+
+  for (let i = 0; i < octaves; i++) {
+    value += amplitude * valueNoise(x * frequency, y * frequency, seed + i * 1000);
+    maxValue += amplitude;
+    amplitude *= gain;
+    frequency *= lacunarity;
+  }
+
+  return value / maxValue;
+}
+
+// ===== Terrain types =====
+const TERRAIN = {
+  DEEP_WATER: 0,
+  WATER: 1,
+  SAND: 2,
+  GRASS: 3,
+  TALL_GRASS: 4,
+  FOREST: 5,
+  DENSE_FOREST: 6,
+  HILL: 7,
+  MOUNTAIN: 8,
+  SNOW: 9,
+  ROAD: 10,
+  VILLAGE: 11,
+  BRIDGE: 12,
+  FIELD: 13,
+  FLOWER: 14,
+};
+
+const TERRAIN_COLORS = {
+  [TERRAIN.DEEP_WATER]: { base: '#1a3a5c', variants: ['#183658', '#1c3e60', '#162f50'] },
+  [TERRAIN.WATER]: { base: '#2a6496', variants: ['#28608e', '#2c689e', '#265c88'] },
+  [TERRAIN.SAND]: { base: '#d4b896', variants: ['#d0b490', '#d8bc9c', '#ccb08a'] },
+  [TERRAIN.GRASS]: { base: '#4a8c3f', variants: ['#468838', '#4e9046', '#428434'] },
+  [TERRAIN.TALL_GRASS]: { base: '#3d7a35', variants: ['#397630', '#41803a', '#35722c'] },
+  [TERRAIN.FOREST]: { base: '#2d6b25', variants: ['#296720', '#316f2a', '#25611e'] },
+  [TERRAIN.DENSE_FOREST]: { base: '#1f5218', variants: ['#1c4e15', '#22561b', '#184812'] },
+  [TERRAIN.HILL]: { base: '#6b8c5a', variants: ['#678854', '#6f9060', '#5f844e'] },
+  [TERRAIN.MOUNTAIN]: { base: '#7a7a7a', variants: ['#747474', '#808080', '#6e6e6e'] },
+  [TERRAIN.SNOW]: { base: '#e8e8f0', variants: ['#e4e4ec', '#ececf4', '#e0e0e8'] },
+  [TERRAIN.ROAD]: { base: '#8a7a5a', variants: ['#867654', '#8e7e60', '#7e724e'] },
+  [TERRAIN.VILLAGE]: { base: '#b8956a', variants: ['#b49166', '#bc996e', '#b08d60'] },
+  [TERRAIN.BRIDGE]: { base: '#8a6a3a', variants: ['#866636', '#8e6e3e', '#826232'] },
+  [TERRAIN.FIELD]: { base: '#8aaa50', variants: ['#86a64c', '#8eae54', '#82a248'] },
+  [TERRAIN.FLOWER]: { base: '#4a8c3f', variants: ['#468838', '#4e9046', '#428434'] },
+};
+
+// ===== World generation =====
+class WorldGen {
+  constructor(seed = 42) {
+    this.seed = seed;
+    this.chunkCache = new Map();
+    this.CHUNK_SIZE = 16;
+    this.rng = new SeededRandom(seed);
+
+    // Pre-generate village centers (sparse grid)
+    this.villageGrid = 64; // one potential village per 64x64 area
+    this.roadSeed = seed + 999;
+  }
+
+  // Get terrain type at world coordinates
+  getTerrain(wx, wy) {
+    const chunkX = Math.floor(wx / this.CHUNK_SIZE);
+    const chunkY = Math.floor(wy / this.CHUNK_SIZE);
+    const localX = ((wx % this.CHUNK_SIZE) + this.CHUNK_SIZE) % this.CHUNK_SIZE;
+    const localY = ((wy % this.CHUNK_SIZE) + this.CHUNK_SIZE) % this.CHUNK_SIZE;
+
+    const key = `${chunkX},${chunkY}`;
+    if (!this.chunkCache.has(key)) {
+      this.generateChunk(chunkX, chunkY);
+    }
+
+    const chunk = this.chunkCache.get(key);
+    return chunk[localY * this.CHUNK_SIZE + localX];
+  }
+
+  // Get elevation at world coordinates (for shading)
+  getElevation(wx, wy) {
+    const scale = 0.015;
+    return fbm(wx * scale, wy * scale, this.seed, 5, 2.0, 0.5);
+  }
+
+  // Get moisture at world coordinates
+  getMoisture(wx, wy) {
+    const scale = 0.012;
+    return fbm(wx * scale, wy * scale, this.seed + 500, 4, 2.0, 0.5);
+  }
+
+  // Check if near a village center
+  nearestVillage(wx, wy) {
+    const gx = Math.floor(wx / this.villageGrid);
+    const gy = Math.floor(wy / this.villageGrid);
+    let bestDist = Infinity;
+    let bestVx = 0, bestVy = 0;
+
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const cgx = gx + dx;
+        const cgy = gy + dy;
+        // Deterministic village position within grid cell
+        const vx = cgx * this.villageGrid + Math.floor(hashFloat(cgx, cgy, this.seed + 777) * this.villageGrid);
+        const vy = cgy * this.villageGrid + Math.floor(hashFloat(cgx, cgy, this.seed + 888) * this.villageGrid);
+
+        const dist = Math.sqrt((wx - vx) ** 2 + (wy - vy) ** 2);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestVx = vx;
+          bestVy = vy;
+        }
+      }
+    }
+
+    return { dist: bestDist, vx: bestVx, vy: bestVy };
+  }
+
+  // Check if tile is on a road (connecting villages)
+  isRoad(wx, wy) {
+    // Roads: check if close to line between two nearest villages
+    const gx = Math.floor(wx / this.villageGrid);
+    const gy = Math.floor(wy / this.villageGrid);
+
+    // Collect nearby village centers
+    const villages = [];
+    for (let dx = -2; dx <= 2; dx++) {
+      for (let dy = -2; dy <= 2; dy++) {
+        const cgx = gx + dx;
+        const cgy = gy + dy;
+        const vx = cgx * this.villageGrid + Math.floor(hashFloat(cgx, cgy, this.seed + 777) * this.villageGrid);
+        const vy = cgy * this.villageGrid + Math.floor(hashFloat(cgx, cgy, this.seed + 888) * this.villageGrid);
+        // Only some grid cells have villages (60% chance)
+        if (hashFloat(cgx, cgy, this.seed + 333) < 0.6) {
+          villages.push({ x: vx, y: vy });
+        }
+      }
+    }
+
+    // Check distance to road segments between connected villages
+    for (let i = 0; i < villages.length; i++) {
+      for (let j = i + 1; j < villages.length; j++) {
+        const a = villages[i];
+        const b = villages[j];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const segLen = Math.sqrt(dx * dx + dy * dy);
+
+        // Only connect nearby villages
+        if (segLen > this.villageGrid * 1.5) continue;
+
+        // Road uses Manhattan-ish path with some noise for natural look
+        // Simplified: check distance to line segment
+        const t = Math.max(0, Math.min(1, ((wx - a.x) * dx + (wy - a.y) * dy) / (segLen * segLen)));
+        const px = a.x + t * dx;
+        const py = a.y + t * dy;
+        const distToRoad = Math.sqrt((wx - px) ** 2 + (wy - py) ** 2);
+
+        // Road width ~1.5 tiles, with noise for natural edges
+        const roadNoise = valueNoise(wx * 0.3, wy * 0.3, this.roadSeed) * 0.8;
+        if (distToRoad < 1.2 + roadNoise) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  generateChunk(chunkX, chunkY) {
+    const chunk = new Uint8Array(this.CHUNK_SIZE * this.CHUNK_SIZE);
+
+    for (let ly = 0; ly < this.CHUNK_SIZE; ly++) {
+      for (let lx = 0; lx < this.CHUNK_SIZE; lx++) {
+        const wx = chunkX * this.CHUNK_SIZE + lx;
+        const wy = chunkY * this.CHUNK_SIZE + ly;
+
+        const elevation = this.getElevation(wx, wy);
+        const moisture = this.getMoisture(wx, wy);
+        const village = this.nearestVillage(wx, wy);
+
+        let terrain;
+
+        // Village area
+        if (village.dist < 4 && elevation > 0.3 && elevation < 0.7) {
+          if (village.dist < 2) {
+            terrain = TERRAIN.VILLAGE;
+          } else if (village.dist < 3) {
+            terrain = TERRAIN.ROAD;
+          } else {
+            terrain = TERRAIN.FIELD;
+          }
+        }
+        // Road
+        else if (this.isRoad(wx, wy) && elevation > 0.25 && elevation < 0.75) {
+          // Check if crossing water — make bridge
+          if (elevation < 0.32) {
+            terrain = TERRAIN.BRIDGE;
+          } else {
+            terrain = TERRAIN.ROAD;
+          }
+        }
+        // Natural terrain based on elevation + moisture
+        else if (elevation < 0.25) {
+          terrain = TERRAIN.DEEP_WATER;
+        } else if (elevation < 0.32) {
+          terrain = TERRAIN.WATER;
+        } else if (elevation < 0.35) {
+          terrain = TERRAIN.SAND;
+        } else if (elevation < 0.55) {
+          if (moisture > 0.6) {
+            // Flowers scattered in high-moisture grassland
+            const flowerNoise = hashFloat(wx, wy, this.seed + 1234);
+            if (flowerNoise < 0.08) {
+              terrain = TERRAIN.FLOWER;
+            } else {
+              terrain = TERRAIN.TALL_GRASS;
+            }
+          } else if (moisture > 0.4) {
+            terrain = TERRAIN.GRASS;
+          } else {
+            terrain = TERRAIN.GRASS;
+          }
+        } else if (elevation < 0.65) {
+          if (moisture > 0.5) {
+            terrain = TERRAIN.DENSE_FOREST;
+          } else if (moisture > 0.3) {
+            terrain = TERRAIN.FOREST;
+          } else {
+            terrain = TERRAIN.HILL;
+          }
+        } else if (elevation < 0.78) {
+          if (moisture > 0.4) {
+            terrain = TERRAIN.FOREST;
+          } else {
+            terrain = TERRAIN.MOUNTAIN;
+          }
+        } else if (elevation < 0.88) {
+          terrain = TERRAIN.MOUNTAIN;
+        } else {
+          terrain = TERRAIN.SNOW;
+        }
+
+        chunk[ly * this.CHUNK_SIZE + lx] = terrain;
+      }
+    }
+
+    const key = `${chunkX},${chunkY}`;
+    this.chunkCache.set(key, chunk);
+
+    // Prune cache if too large
+    if (this.chunkCache.size > 256) {
+      const keys = [...this.chunkCache.keys()];
+      for (let i = 0; i < 64; i++) {
+        this.chunkCache.delete(keys[i]);
+      }
+    }
+  }
+}
+
+</script>
+  <script>
+// renderer.js — Pixel art rendering engine with day/night cycle, weather, details
+
+class Renderer {
+  constructor(canvas, worldGen) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.world = worldGen;
+
+    this.TILE_SIZE = 24; // px per tile (default)
+    this.MIN_TILE_SIZE = 12;
+    this.MAX_TILE_SIZE = 48;
+    this.camera = { x: 0, y: 0 }; // world coordinates (center of view)
+
+    // Day/night cycle
+    this.timeOfDay = 0.35; // 0-1, 0=midnight, 0.25=dawn, 0.5=noon, 0.75=dusk
+    this.timeSpeed = 0.00003; // full cycle in ~33k frames (~9 min at 60fps)
+
+    // Weather
+    this.weather = 'clear'; // clear, rain, snow
+    this.weatherTimer = 0;
+    this.weatherDuration = 0;
+    this.raindrops = [];
+    this.snowflakes = [];
+
+    // Animated details
+    this.frameCount = 0;
+
+    // Tile detail cache (decorations per tile)
+    this.detailCache = new Map();
+
+    // Water animation
+    this.waterPhase = 0;
+  }
+
+  resize() {
+    const dpr = window.devicePixelRatio || 1;
+    this.canvas.width = window.innerWidth * dpr;
+    this.canvas.height = window.innerHeight * dpr;
+    this.canvas.style.width = window.innerWidth + 'px';
+    this.canvas.style.height = window.innerHeight + 'px';
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.ctx.imageSmoothingEnabled = false;
+  }
+
+  // Day/night lighting color
+  getDaylightColor() {
+    const t = this.timeOfDay;
+    // Night: dark blue, Dawn: orange-pink, Day: white, Dusk: orange-purple
+    if (t < 0.2) {
+      // Night
+      return { r: 20, g: 25, b: 60, a: 0.55 };
+    } else if (t < 0.3) {
+      // Dawn transition
+      const p = (t - 0.2) / 0.1;
+      return {
+        r: 20 + p * 220,
+        g: 25 + p * 130,
+        b: 60 + p * 40,
+        a: 0.55 * (1 - p) + 0.05 * p
+      };
+    } else if (t < 0.7) {
+      // Day
+      return { r: 255, g: 255, b: 255, a: 0.0 };
+    } else if (t < 0.8) {
+      // Dusk transition
+      const p = (t - 0.7) / 0.1;
+      return {
+        r: 255 - p * 50,
+        g: 255 - p * 130,
+        b: 255 - p * 100,
+        a: p * 0.35
+      };
+    } else {
+      // Night transition
+      const p = (t - 0.8) / 0.2;
+      return {
+        r: 205 - p * 185,
+        g: 125 - p * 100,
+        b: 155 - p * 95,
+        a: 0.35 + p * 0.2
+      };
+    }
+  }
+
+  getTimeLabel() {
+    const hours = Math.floor(this.timeOfDay * 24);
+    const mins = Math.floor((this.timeOfDay * 24 - hours) * 60);
+    return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+  }
+
+  getSkyGradient() {
+    const t = this.timeOfDay;
+    if (t < 0.2 || t > 0.85) {
+      return ['#0a0a2a', '#141440']; // night
+    } else if (t < 0.3) {
+      const p = (t - 0.2) / 0.1;
+      return [
+        this.lerpColor('#0a0a2a', '#ff7744', p),
+        this.lerpColor('#141440', '#ffaa66', p)
+      ];
+    } else if (t < 0.7) {
+      return ['#4a90d9', '#87ceeb']; // day
+    } else if (t < 0.85) {
+      const p = (t - 0.7) / 0.15;
+      return [
+        this.lerpColor('#4a90d9', '#cc4400', p),
+        this.lerpColor('#87ceeb', '#ff6633', p)
+      ];
+    }
+    return ['#0a0a2a', '#141440'];
+  }
+
+  lerpColor(a, b, t) {
+    const ar = parseInt(a.slice(1, 3), 16), ag = parseInt(a.slice(3, 5), 16), ab = parseInt(a.slice(5, 7), 16);
+    const br = parseInt(b.slice(1, 3), 16), bg = parseInt(b.slice(3, 5), 16), bb = parseInt(b.slice(5, 7), 16);
+    const rr = Math.round(ar + (br - ar) * t), rg = Math.round(ag + (bg - ag) * t), rb = Math.round(ab + (bb - ab) * t);
+    return `#${rr.toString(16).padStart(2, '0')}${rg.toString(16).padStart(2, '0')}${rb.toString(16).padStart(2, '0')}`;
+  }
+
+  // Get details/decorations for a tile (cached, deterministic)
+  getDetails(wx, wy, terrain) {
+    const key = `${wx},${wy}`;
+    if (this.detailCache.has(key)) return this.detailCache.get(key);
+
+    const details = [];
+    const h = hashFloat(wx, wy, this.world.seed + 5000);
+    const h2 = hashFloat(wx, wy, this.world.seed + 6000);
+    const h3 = hashFloat(wx, wy, this.world.seed + 7000);
+
+    switch (terrain) {
+      case TERRAIN.GRASS:
+      case TERRAIN.TALL_GRASS:
+        // Grass tufts
+        if (h < 0.3) {
+          details.push({ type: 'grass_tuft', x: h2 * 10, y: h3 * 10, variant: Math.floor(h * 10) % 3 });
+        }
+        break;
+
+      case TERRAIN.FLOWER:
+        // Flower
+        const flowerColors = ['#ff6b8a', '#ffaa44', '#aa66ff', '#66aaff', '#ff66aa', '#ffff44'];
+        details.push({
+          type: 'flower',
+          x: 4 + h2 * 8,
+          y: 4 + h3 * 8,
+          color: flowerColors[Math.floor(h * flowerColors.length)]
+        });
+        break;
+
+      case TERRAIN.FOREST:
+      case TERRAIN.DENSE_FOREST:
+        // Trees
+        details.push({
+          type: 'tree',
+          x: 2 + h2 * 8,
+          y: 0,
+          size: terrain === TERRAIN.DENSE_FOREST ? 14 : 12,
+          variant: Math.floor(h * 3)
+        });
+        break;
+
+      case TERRAIN.VILLAGE:
+        // Buildings
+        if (h < 0.4) {
+          details.push({
+            type: 'house',
+            x: 1,
+            y: 0,
+            variant: Math.floor(h2 * 4),
+            roofColor: ['#8b4513', '#a0522d', '#cd853f', '#b22222'][Math.floor(h3 * 4)]
+          });
+        } else if (h < 0.55) {
+          details.push({ type: 'well', x: 4, y: 4 });
+        }
+        break;
+
+      case TERRAIN.MOUNTAIN:
+        // Rock details
+        if (h < 0.2) {
+          details.push({ type: 'rock', x: h2 * 10, y: h3 * 10 });
+        }
+        break;
+
+      case TERRAIN.WATER:
+      case TERRAIN.DEEP_WATER:
+        // Occasional fish shadow or sparkle
+        if (h < 0.05) {
+          details.push({ type: 'fish', x: h2 * 12, y: h3 * 12 });
+        }
+        break;
+
+      case TERRAIN.SAND:
+        // Shells
+        if (h < 0.08) {
+          details.push({ type: 'shell', x: h2 * 12, y: h3 * 12 });
+        }
+        break;
+
+      case TERRAIN.SNOW:
+        // Snowman (rare)
+        if (h < 0.02) {
+          details.push({ type: 'snowman', x: 3, y: 1 });
+        }
+        break;
+
+      case TERRAIN.FIELD:
+        // Crops
+        if (h < 0.7) {
+          details.push({ type: 'crops', x: 0, y: 0, variant: Math.floor(h2 * 3) });
+        }
+        break;
+    }
+
+    // Limit cache size
+    if (this.detailCache.size > 5000) {
+      const entries = [...this.detailCache.keys()];
+      for (let i = 0; i < 1000; i++) this.detailCache.delete(entries[i]);
+    }
+
+    this.detailCache.set(key, details);
+    return details;
+  }
+
+  // Draw a single tile
+  drawTile(ctx, wx, wy, screenX, screenY) {
+    const terrain = this.world.getTerrain(wx, wy);
+    const ts = this.TILE_SIZE;
+    const colors = TERRAIN_COLORS[terrain];
+
+    // Base color with subtle variation
+    const variantIdx = (Math.abs(hash2D(wx, wy, 12345)) % colors.variants.length);
+    ctx.fillStyle = colors.variants[variantIdx];
+
+    // Water animation
+    if (terrain === TERRAIN.WATER || terrain === TERRAIN.DEEP_WATER) {
+      const wave = Math.sin(this.waterPhase + wx * 0.5 + wy * 0.3) * 0.1;
+      const baseColor = colors.variants[variantIdx];
+      const r = parseInt(baseColor.slice(1, 3), 16);
+      const g = parseInt(baseColor.slice(3, 5), 16);
+      const b = parseInt(baseColor.slice(5, 7), 16);
+      const adj = Math.floor(wave * 30);
+      ctx.fillStyle = `rgb(${Math.max(0, Math.min(255, r + adj))},${Math.max(0, Math.min(255, g + adj))},${Math.max(0, Math.min(255, b + adj + 10))})`;
+    }
+
+    ctx.fillRect(screenX, screenY, ts + 1, ts + 1); // +1 to avoid gaps
+
+    // Draw details
+    const details = this.getDetails(wx, wy, terrain);
+    for (const d of details) {
+      this.drawDetail(ctx, d, screenX, screenY, wx, wy);
+    }
+  }
+
+  drawDetail(ctx, detail, sx, sy, wx, wy) {
+    const ts = this.TILE_SIZE;
+    const s = ts / 16; // scale factor
+    switch (detail.type) {
+      case 'grass_tuft': {
+        ctx.fillStyle = '#5a9c4f';
+        const sway = Math.sin(this.frameCount * 0.03 + wx * 0.5) * s;
+        ctx.fillRect(sx + detail.x*s + sway, sy + detail.y*s, 2*s, 4*s);
+        ctx.fillRect(sx + detail.x*s + 3*s + sway, sy + detail.y*s + s, s, 3*s);
+        break;
+      }
+
+      case 'flower': {
+        const fx = sx + detail.x*s;
+        const fy = sy + detail.y*s;
+        // Stem
+        ctx.fillStyle = '#2d6b25';
+        ctx.fillRect(fx + s, fy + 3*s, s, 4*s);
+        // Petals
+        ctx.fillStyle = detail.color;
+        ctx.fillRect(fx, fy + s, 3*s, 3*s);
+        ctx.fillRect(fx + s, fy, s, s);
+        ctx.fillRect(fx + s, fy + 4*s, s, s);
+        // Center
+        ctx.fillStyle = '#ffff00';
+        ctx.fillRect(fx + s, fy + 2*s, s, s);
+        break;
+      }
+
+      case 'tree': {
+        const tx = sx + detail.x*s;
+        const ty = sy + detail.y*s;
+        // Trunk
+        ctx.fillStyle = '#5a3a1a';
+        ctx.fillRect(tx + 3*s, ty + 8*s, 3*s, 6*s);
+        // Canopy (varies by variant)
+        const sway = Math.sin(this.frameCount * 0.02 + wx * 0.7 + wy * 0.3) * s * 0.5;
+        if (detail.variant === 0) {
+          // Round tree
+          ctx.fillStyle = '#1a6b12';
+          ctx.fillRect(tx + s + sway, ty + 2*s, 7*s, 5*s);
+          ctx.fillRect(tx + 2*s + sway, ty + s, 5*s, 7*s);
+          ctx.fillStyle = '#228b1a';
+          ctx.fillRect(tx + 2*s + sway, ty + 2*s, 5*s, 5*s);
+          ctx.fillRect(tx + 3*s + sway, ty + s, 3*s, 6*s);
+        } else if (detail.variant === 1) {
+          // Pine tree
+          ctx.fillStyle = '#1a5a12';
+          ctx.fillRect(tx + 3*s + sway, ty + s, 3*s, 2*s);
+          ctx.fillRect(tx + 2*s + sway, ty + 3*s, 5*s, 2*s);
+          ctx.fillRect(tx + s + sway, ty + 5*s, 7*s, 3*s);
+          ctx.fillStyle = '#228818';
+          ctx.fillRect(tx + 3*s + sway, ty + s, 2*s, 2*s);
+          ctx.fillRect(tx + 2*s + sway, ty + 3*s, 4*s, 2*s);
+          ctx.fillRect(tx + s + sway, ty + 5*s, 6*s, 3*s);
+        } else {
+          // Bush/wide tree
+          ctx.fillStyle = '#226b18';
+          ctx.fillRect(tx + sway, ty + 3*s, 9*s, 5*s);
+          ctx.fillRect(tx + s + sway, ty + 2*s, 7*s, 6*s);
+          ctx.fillStyle = '#2a8820';
+          ctx.fillRect(tx + s + sway, ty + 3*s, 7*s, 4*s);
+        }
+        break;
+      }
+
+      case 'house': {
+        const hx = sx + detail.x*s;
+        const hy = sy + detail.y*s;
+        // Walls
+        ctx.fillStyle = '#e8d8b8';
+        ctx.fillRect(hx + s, hy + 5*s, 12*s, 9*s);
+        // Door
+        ctx.fillStyle = '#5a3a1a';
+        ctx.fillRect(hx + 5*s, hy + 9*s, 3*s, 5*s);
+        // Door handle
+        ctx.fillStyle = '#c0a050';
+        ctx.fillRect(hx + 7*s, hy + 11*s, s, s);
+        // Roof
+        ctx.fillStyle = detail.roofColor;
+        ctx.fillRect(hx, hy + 2*s, 14*s, 4*s);
+        ctx.fillRect(hx + s, hy + s, 12*s, 2*s);
+        ctx.fillRect(hx + 3*s, hy, 8*s, 2*s);
+        // Window with frame
+        const windowColor = (this.timeOfDay < 0.25 || this.timeOfDay > 0.75) ? '#ffdd55' : '#87ceeb';
+        ctx.fillStyle = '#5a4a3a';
+        ctx.fillRect(hx + 2*s, hy + 6*s, 4*s, 3*s);
+        ctx.fillRect(hx + 8*s, hy + 6*s, 4*s, 3*s);
+        ctx.fillStyle = windowColor;
+        ctx.fillRect(hx + 3*s, hy + 6*s, 2*s, 2*s);
+        ctx.fillRect(hx + 9*s, hy + 6*s, 2*s, 2*s);
+        // Chimney
+        ctx.fillStyle = '#666';
+        ctx.fillRect(hx + 10*s, hy - s, 2*s, 3*s);
+        break;
+      }
+
+      case 'well': {
+        ctx.fillStyle = '#888';
+        ctx.fillRect(sx + detail.x*s, sy + detail.y*s, 6*s, 6*s);
+        ctx.fillStyle = '#2a6496';
+        ctx.fillRect(sx + detail.x*s + s, sy + detail.y*s + s, 4*s, 4*s);
+        ctx.fillStyle = '#aaa';
+        ctx.fillRect(sx + detail.x*s + 2*s, sy + detail.y*s - s, 2*s, s);
+        break;
+      }
+
+      case 'rock': {
+        ctx.fillStyle = '#999';
+        ctx.fillRect(sx + detail.x*s, sy + detail.y*s + s, 4*s, 3*s);
+        ctx.fillStyle = '#aaa';
+        ctx.fillRect(sx + detail.x*s + s, sy + detail.y*s, 2*s, s);
+        break;
+      }
+
+      case 'fish': {
+        const swimX = Math.sin(this.frameCount * 0.05 + wx) * 3*s;
+        ctx.fillStyle = 'rgba(100,120,140,0.4)';
+        ctx.fillRect(sx + detail.x*s + swimX, sy + detail.y*s, 3*s, s);
+        ctx.fillRect(sx + detail.x*s + swimX - s, sy + detail.y*s + s, s, s);
+        break;
+      }
+
+      case 'shell': {
+        ctx.fillStyle = '#f0e0d0';
+        ctx.fillRect(sx + detail.x*s, sy + detail.y*s, 2*s, 2*s);
+        ctx.fillStyle = '#e0c8b0';
+        ctx.fillRect(sx + detail.x*s, sy + detail.y*s, s, s);
+        break;
+      }
+
+      case 'snowman': {
+        const smx = sx + detail.x*s;
+        const smy = sy + detail.y*s;
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(smx + 2*s, smy + 8*s, 5*s, 5*s);
+        ctx.fillRect(smx + 3*s, smy + 4*s, 3*s, 4*s);
+        ctx.fillRect(smx + 4*s, smy + 2*s, 2*s, 3*s);
+        ctx.fillStyle = '#f80';
+        ctx.fillRect(smx + 6*s, smy + 3*s, 2*s, s);
+        ctx.fillStyle = '#222';
+        ctx.fillRect(smx + 4*s, smy + 2*s, s, s);
+        break;
+      }
+
+      case 'crops': {
+        const cropColors = ['#8aaa50', '#aacc44', '#99bb55'];
+        ctx.fillStyle = cropColors[detail.variant];
+        for (let i = 0; i < 4; i++) {
+          const cy = (2 + i * 3) * s;
+          const sway = Math.sin(this.frameCount * 0.02 + i + wx) * 0.5 * s;
+          ctx.fillRect(sx + s + sway, sy + cy, 13*s, 2*s);
+        }
+        ctx.fillStyle = '#6a5a3a';
+        for (let i = 0; i < 4; i++) {
+          ctx.fillRect(sx, sy + (3 + i * 3) * s, ts, s);
+        }
+        break;
+      }
+    }
+  }
+
+  // Update weather
+  updateWeather() {
+    this.weatherTimer++;
+    if (this.weatherTimer > this.weatherDuration) {
+      // Change weather
+      const r = Math.random();
+      if (r < 0.6) {
+        this.weather = 'clear';
+        this.weatherDuration = 3000 + Math.random() * 5000;
+      } else if (r < 0.85) {
+        this.weather = 'rain';
+        this.weatherDuration = 2000 + Math.random() * 3000;
+        this.raindrops = [];
+      } else {
+        this.weather = 'snow';
+        this.weatherDuration = 2000 + Math.random() * 4000;
+        this.snowflakes = [];
+      }
+      this.weatherTimer = 0;
+    }
+  }
+
+  drawWeather(ctx, w, h) {
+    if (this.weather === 'rain') {
+      // Add new raindrops
+      for (let i = 0; i < 3; i++) {
+        this.raindrops.push({
+          x: Math.random() * w,
+          y: -10,
+          speed: 6 + Math.random() * 4,
+          length: 8 + Math.random() * 6
+        });
+      }
+      // Draw and update
+      ctx.strokeStyle = 'rgba(150,180,220,0.4)';
+      ctx.lineWidth = 1;
+      for (let i = this.raindrops.length - 1; i >= 0; i--) {
+        const d = this.raindrops[i];
+        ctx.beginPath();
+        ctx.moveTo(d.x, d.y);
+        ctx.lineTo(d.x - 1, d.y + d.length);
+        ctx.stroke();
+        d.y += d.speed;
+        if (d.y > h + 20) this.raindrops.splice(i, 1);
+      }
+      // Cap raindrops
+      if (this.raindrops.length > 200) this.raindrops.splice(0, 50);
+    }
+
+    if (this.weather === 'snow') {
+      // Add new snowflakes
+      if (this.frameCount % 2 === 0) {
+        this.snowflakes.push({
+          x: Math.random() * w,
+          y: -5,
+          speed: 0.5 + Math.random() * 1.5,
+          drift: (Math.random() - 0.5) * 0.5,
+          size: 1 + Math.random() * 2
+        });
+      }
+      ctx.fillStyle = 'rgba(240,240,255,0.7)';
+      for (let i = this.snowflakes.length - 1; i >= 0; i--) {
+        const s = this.snowflakes[i];
+        ctx.fillRect(s.x, s.y, s.size, s.size);
+        s.y += s.speed;
+        s.x += s.drift + Math.sin(this.frameCount * 0.01 + i) * 0.3;
+        if (s.y > h + 10) this.snowflakes.splice(i, 1);
+      }
+      if (this.snowflakes.length > 300) this.snowflakes.splice(0, 50);
+    }
+  }
+
+  // Stars at night
+  drawStars(ctx, w, h) {
+    if (this.timeOfDay > 0.25 && this.timeOfDay < 0.75) return;
+
+    let alpha;
+    if (this.timeOfDay < 0.2 || this.timeOfDay > 0.85) {
+      alpha = 0.8;
+    } else if (this.timeOfDay < 0.25) {
+      alpha = 0.8 * (1 - (this.timeOfDay - 0.2) / 0.05);
+    } else {
+      alpha = 0.8 * ((this.timeOfDay - 0.75) / 0.1);
+    }
+
+    const starSeed = 42;
+    const rng = new SeededRandom(starSeed);
+    ctx.fillStyle = `rgba(255,255,240,${alpha})`;
+    for (let i = 0; i < 80; i++) {
+      const x = rng.next() * w;
+      const y = rng.next() * h * 0.3;
+      const size = rng.next() < 0.1 ? 2 : 1;
+      const twinkle = Math.sin(this.frameCount * 0.05 + i * 7) > 0.3;
+      if (twinkle) {
+        ctx.fillRect(x, y, size, size);
+      }
+    }
+
+    // Moon
+    if (this.timeOfDay < 0.25 || this.timeOfDay > 0.8) {
+      const moonX = w * 0.8;
+      const moonY = 30;
+      ctx.fillStyle = `rgba(240,240,220,${alpha})`;
+      ctx.beginPath();
+      ctx.arc(moonX, moonY, 15, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = `rgba(220,220,200,${alpha * 0.5})`;
+      ctx.beginPath();
+      ctx.arc(moonX - 3, moonY - 3, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(moonX + 5, moonY + 4, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Main render frame
+  render(playerX, playerY) {
+    const ctx = this.ctx;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const ts = this.TILE_SIZE;
+
+    this.frameCount++;
+    this.timeOfDay = (this.timeOfDay + this.timeSpeed) % 1.0;
+    this.waterPhase += 0.03;
+    this.updateWeather();
+
+    // Sky gradient
+    const skyColors = this.getSkyGradient();
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, skyColors[0]);
+    grad.addColorStop(1, skyColors[1]);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+
+    // Stars
+    this.drawStars(ctx, w, h);
+
+    // Camera follows player smoothly
+    this.camera.x += (playerX - this.camera.x) * 0.1;
+    this.camera.y += (playerY - this.camera.y) * 0.1;
+
+    // Calculate visible tile range
+    const tilesX = Math.ceil(w / ts) + 2;
+    const tilesY = Math.ceil(h / ts) + 2;
+    const startTileX = Math.floor(this.camera.x) - Math.floor(tilesX / 2);
+    const startTileY = Math.floor(this.camera.y) - Math.floor(tilesY / 2);
+
+    const offsetX = (this.camera.x - Math.floor(this.camera.x)) * ts;
+    const offsetY = (this.camera.y - Math.floor(this.camera.y)) * ts;
+
+    // Draw terrain
+    for (let ty = 0; ty <= tilesY; ty++) {
+      for (let tx = 0; tx <= tilesX; tx++) {
+        const wx = startTileX + tx;
+        const wy = startTileY + ty;
+        const screenX = tx * ts - offsetX;
+        const screenY = ty * ts - offsetY;
+        this.drawTile(ctx, wx, wy, screenX, screenY);
+      }
+    }
+
+    // Day/night overlay
+    const daylight = this.getDaylightColor();
+    if (daylight.a > 0) {
+      ctx.fillStyle = `rgba(${Math.floor(daylight.r)},${Math.floor(daylight.g)},${Math.floor(daylight.b)},${daylight.a})`;
+      ctx.fillRect(0, 0, w, h);
+
+      // Light around player at night
+      if (daylight.a > 0.3) {
+        const px = (playerX - startTileX) * ts - offsetX + ts / 2;
+        const py = (playerY - startTileY) * ts - offsetY + ts / 2;
+        const lightRadius = 80;
+        const gradient = ctx.createRadialGradient(px, py, 0, px, py, lightRadius);
+        gradient.addColorStop(0, `rgba(255,200,100,${daylight.a * 0.6})`);
+        gradient.addColorStop(0.5, `rgba(255,180,80,${daylight.a * 0.3})`);
+        gradient.addColorStop(1, 'rgba(255,180,80,0)');
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = gradient;
+        ctx.fillRect(px - lightRadius, py - lightRadius, lightRadius * 2, lightRadius * 2);
+        ctx.globalCompositeOperation = 'source-over';
+      }
+    }
+
+    // Weather
+    this.drawWeather(ctx, w, h);
+
+    // Player character
+    this.drawPlayer(ctx, playerX, playerY, startTileX, startTileY, offsetX, offsetY, ts);
+
+    // Vignette
+    this.drawVignette(ctx, w, h);
+  }
+
+  drawPlayer(ctx, playerX, playerY, startTileX, startTileY, offsetX, offsetY, ts) {
+    const px = (playerX - startTileX) * ts - offsetX;
+    const py = (playerY - startTileY) * ts - offsetY;
+    const s = ts / 16; // scale factor relative to 16px base
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fillRect(px + 3*s, py + ts - 3*s, ts - 6*s, 3*s);
+
+    // Body
+    ctx.fillStyle = '#4466aa'; // blue tunic
+    ctx.fillRect(px + 4*s, py + 7*s, 8*s, 5*s);
+
+    // Arms
+    ctx.fillStyle = '#3355aa';
+    ctx.fillRect(px + 3*s, py + 7*s, 2*s, 4*s);
+    ctx.fillRect(px + 11*s, py + 7*s, 2*s, 4*s);
+
+    // Head
+    ctx.fillStyle = '#f0c8a0'; // skin
+    ctx.fillRect(px + 5*s, py + 2*s, 6*s, 5*s);
+
+    // Hair
+    ctx.fillStyle = '#6a4a2a';
+    ctx.fillRect(px + 4*s, py + 1*s, 8*s, 3*s);
+    ctx.fillRect(px + 4*s, py + 2*s, 2*s, 2*s);
+    ctx.fillRect(px + 11*s, py + 2*s, 1*s, 2*s);
+
+    // Eyes
+    ctx.fillStyle = '#222';
+    ctx.fillRect(px + 6*s, py + 4*s, 1*s, 1*s);
+    ctx.fillRect(px + 9*s, py + 4*s, 1*s, 1*s);
+
+    // Mouth
+    ctx.fillStyle = '#c08060';
+    ctx.fillRect(px + 7*s, py + 6*s, 2*s, 1*s);
+
+    // Belt
+    ctx.fillStyle = '#8a6a3a';
+    ctx.fillRect(px + 4*s, py + 11*s, 8*s, 1*s);
+
+    // Legs
+    ctx.fillStyle = '#5a4a3a';
+    const walkCycle = Math.sin(this.frameCount * 0.15);
+    if (Math.abs(walkCycle) > 0.3 && this._playerMoving) {
+      ctx.fillRect(px + 5*s, py + 12*s, 2*s, 3*s);
+      ctx.fillRect(px + 9*s, py + 12*s, 2*s, 3*s);
+    } else {
+      ctx.fillRect(px + 5*s, py + 12*s, 3*s, 3*s);
+      ctx.fillRect(px + 8*s, py + 12*s, 3*s, 3*s);
+    }
+
+    // Boots
+    ctx.fillStyle = '#4a3a2a';
+    ctx.fillRect(px + 4*s, py + 14*s, 4*s, 2*s);
+    ctx.fillRect(px + 9*s, py + 14*s, 4*s, 2*s);
+  }
+
+  set playerMoving(v) { this._playerMoving = v; }
+
+  zoomIn() {
+    this.TILE_SIZE = Math.min(this.MAX_TILE_SIZE, this.TILE_SIZE + 4);
+    this.detailCache.clear();
+  }
+
+  zoomOut() {
+    this.TILE_SIZE = Math.max(this.MIN_TILE_SIZE, this.TILE_SIZE - 4);
+    this.detailCache.clear();
+  }
+
+  drawVignette(ctx, w, h) {
+    const gradient = ctx.createRadialGradient(w/2, h/2, Math.min(w,h) * 0.3, w/2, h/2, Math.max(w,h) * 0.75);
+    gradient.addColorStop(0, 'rgba(0,0,0,0)');
+    gradient.addColorStop(1, 'rgba(0,0,0,0.35)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, w, h);
+  }
+}
+</script>
+  <script>
+// game.js — Main game loop, input handling, UI, minimap
+
+class Game {
+  constructor() {
+    this.canvas = document.getElementById('world');
+    this.seed = this.getSeedFromURL() || Math.floor(Math.random() * 999999);
+    this.world = new WorldGen(this.seed);
+    this.renderer = new Renderer(this.canvas, this.world);
+
+    // Player state
+    this.player = { x: 0, y: 0 };
+    this.moveSpeed = 0.08;
+    this.keys = {};
+    this.touchStart = null;
+    this.touchCurrent = null;
+
+    // UI state
+    this.showMinimap = true;
+    this.showHUD = true;
+    this.showHelp = false;
+    this.paused = false;
+    this.screenshotMode = false;
+
+    // Stats
+    this.tilesExplored = new Set();
+    this.startTime = Date.now();
+    this.distanceTraveled = 0;
+    this.lastPos = { x: 0, y: 0 };
+
+    // Seed input
+    this.seedInput = null;
+
+    this.init();
+    window._game = this;
+  }
+
+  getSeedFromURL() {
+    const params = new URLSearchParams(window.location.search);
+    const seed = params.get('seed');
+    return seed ? parseInt(seed) : null;
+  }
+
+  init() {
+    this.renderer.resize();
+    window.addEventListener('resize', () => this.renderer.resize());
+
+    // Keyboard
+    window.addEventListener('keydown', (e) => this.onKeyDown(e));
+    window.addEventListener('keyup', (e) => this.onKeyUp(e));
+
+    // Mouse wheel zoom
+    this.canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      if (e.deltaY < 0) this.renderer.zoomIn();
+      else this.renderer.zoomOut();
+    }, { passive: false });
+
+    // Touch
+    this.canvas.addEventListener('touchstart', (e) => this.onTouchStart(e));
+    this.canvas.addEventListener('touchmove', (e) => this.onTouchMove(e));
+    this.canvas.addEventListener('touchend', (e) => this.onTouchEnd(e));
+
+    // Start game loop
+    this.loop();
+
+    // Update URL
+    this.updateURL();
+  }
+
+  updateURL() {
+    const url = new URL(window.location);
+    url.searchParams.set('seed', this.seed);
+    window.history.replaceState({}, '', url);
+  }
+
+  onKeyDown(e) {
+    this.keys[e.code] = true;
+
+    switch (e.code) {
+      case 'KeyM':
+        this.showMinimap = !this.showMinimap;
+        break;
+      case 'KeyH':
+        this.showHUD = !this.showHUD;
+        break;
+      case 'Escape':
+        this.showHelp = !this.showHelp;
+        break;
+      case 'KeyP':
+        this.paused = !this.paused;
+        break;
+      case 'KeyF':
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen();
+        } else {
+          document.exitFullscreen();
+        }
+        break;
+      case 'KeyR':
+        this.seed = Math.floor(Math.random() * 999999);
+        this.world = new WorldGen(this.seed);
+        this.renderer.world = this.world;
+        this.renderer.detailCache.clear();
+        this.player.x = 0;
+        this.player.y = 0;
+        this.tilesExplored.clear();
+        this.distanceTraveled = 0;
+        this.startTime = Date.now();
+        this.updateURL();
+        break;
+      case 'BracketRight':
+        this.renderer.timeSpeed = Math.min(0.001, this.renderer.timeSpeed * 2);
+        break;
+      case 'BracketLeft':
+        this.renderer.timeSpeed = Math.max(0.000005, this.renderer.timeSpeed / 2);
+        break;
+      case 'Equal':
+      case 'NumpadAdd':
+        this.renderer.zoomIn();
+        break;
+      case 'Minus':
+      case 'NumpadSubtract':
+        this.renderer.zoomOut();
+        break;
+    }
+  }
+
+  onKeyUp(e) {
+    this.keys[e.code] = false;
+  }
+
+  onTouchStart(e) {
+    e.preventDefault();
+    const touch = e.touches[0];
+    this.touchStart = { x: touch.clientX, y: touch.clientY };
+    this.touchCurrent = { x: touch.clientX, y: touch.clientY };
+  }
+
+  onTouchMove(e) {
+    e.preventDefault();
+    const touch = e.touches[0];
+    this.touchCurrent = { x: touch.clientX, y: touch.clientY };
+  }
+
+  onTouchEnd(e) {
+    e.preventDefault();
+    this.touchStart = null;
+    this.touchCurrent = null;
+  }
+
+  update() {
+    if (this.paused) return;
+
+    let dx = 0, dy = 0;
+
+    // Keyboard movement
+    if (this.keys['ArrowLeft'] || this.keys['KeyA']) dx -= 1;
+    if (this.keys['ArrowRight'] || this.keys['KeyD']) dx += 1;
+    if (this.keys['ArrowUp'] || this.keys['KeyW']) dy -= 1;
+    if (this.keys['ArrowDown'] || this.keys['KeyS']) dy += 1;
+
+    // Sprint
+    let speed = this.moveSpeed;
+    if (this.keys['ShiftLeft'] || this.keys['ShiftRight']) speed *= 1.8;
+
+    // Touch movement (joystick-like)
+    if (this.touchStart && this.touchCurrent) {
+      const tdx = this.touchCurrent.x - this.touchStart.x;
+      const tdy = this.touchCurrent.y - this.touchStart.y;
+      const dist = Math.sqrt(tdx * tdx + tdy * tdy);
+      if (dist > 10) {
+        dx += tdx / dist;
+        dy += tdy / dist;
+        if (dist > 80) speed *= 1.8; // sprint on far drag
+      }
+    }
+
+    // Normalize diagonal
+    if (dx !== 0 && dy !== 0) {
+      const len = Math.sqrt(dx * dx + dy * dy);
+      dx /= len;
+      dy /= len;
+    }
+
+    // Terrain-based speed modifier
+    const currentTerrain = this.world.getTerrain(Math.round(this.player.x), Math.round(this.player.y));
+    switch (currentTerrain) {
+      case TERRAIN.WATER:
+      case TERRAIN.DEEP_WATER:
+        speed *= 0.4; // slow in water
+        break;
+      case TERRAIN.SAND:
+        speed *= 0.7;
+        break;
+      case TERRAIN.ROAD:
+      case TERRAIN.BRIDGE:
+        speed *= 1.3; // fast on roads
+        break;
+      case TERRAIN.MOUNTAIN:
+        speed *= 0.5;
+        break;
+      case TERRAIN.SNOW:
+        speed *= 0.6;
+        break;
+      case TERRAIN.DENSE_FOREST:
+        speed *= 0.7;
+        break;
+    }
+
+    this.player.x += dx * speed;
+    this.player.y += dy * speed;
+
+    // Update movement flag for animation
+    this.renderer.playerMoving = (dx !== 0 || dy !== 0);
+
+    // Track exploration
+    const tileKey = `${Math.round(this.player.x)},${Math.round(this.player.y)}`;
+    this.tilesExplored.add(tileKey);
+
+    // Distance
+    const ddx = this.player.x - this.lastPos.x;
+    const ddy = this.player.y - this.lastPos.y;
+    this.distanceTraveled += Math.sqrt(ddx * ddx + ddy * ddy);
+    this.lastPos.x = this.player.x;
+    this.lastPos.y = this.player.y;
+  }
+
+  drawMinimap(ctx) {
+    if (!this.showMinimap) return;
+
+    const size = 120;
+    const margin = 15;
+    const x = window.innerWidth - size - margin;
+    const y = margin;
+    const scale = 3; // each pixel = 3x3 world tiles
+
+    // Background
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(x - 2, y - 2, size + 4, size + 4);
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x - 2, y - 2, size + 4, size + 4);
+
+    // Draw minimap terrain
+    const centerWx = Math.round(this.player.x);
+    const centerWy = Math.round(this.player.y);
+    const halfTiles = Math.floor(size / 2);
+
+    for (let my = 0; my < size; my += 2) {
+      for (let mx = 0; mx < size; mx += 2) {
+        const wx = centerWx + (mx - halfTiles) * scale;
+        const wy = centerWy + (my - halfTiles) * scale;
+        const terrain = this.world.getTerrain(wx, wy);
+        ctx.fillStyle = TERRAIN_COLORS[terrain].base;
+        ctx.fillRect(x + mx, y + my, 2, 2);
+      }
+    }
+
+    // Player dot
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(x + halfTiles - 1, y + halfTiles - 1, 3, 3);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(x + halfTiles, y + halfTiles, 1, 1);
+  }
+
+  drawHUD(ctx) {
+    if (!this.showHUD) return;
+
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+
+    ctx.font = '12px monospace';
+
+    // Coordinates
+    const coordText = `${Math.round(this.player.x)}, ${Math.round(this.player.y)}`;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(10, 10, ctx.measureText(coordText).width + 16, 22);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(coordText, 18, 25);
+
+    // Time of day
+    const timeText = this.renderer.getTimeLabel();
+    const timeIcon = this.getTimeIcon();
+    const fullTime = `${timeIcon} ${timeText}`;
+    const timeWidth = ctx.measureText(fullTime).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(10, 38, timeWidth + 16, 22);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(fullTime, 18, 53);
+
+    // Weather
+    const weatherIcon = this.renderer.weather === 'rain' ? '🌧' : this.renderer.weather === 'snow' ? '❄️' : '☀️';
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(10, 66, 30, 22);
+    ctx.fillText(weatherIcon, 14, 81);
+
+    // Current terrain
+    const terrain = this.world.getTerrain(Math.round(this.player.x), Math.round(this.player.y));
+    const terrainName = this.getTerrainName(terrain);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    const tnw = ctx.measureText(terrainName).width;
+    ctx.fillRect(10, 94, tnw + 16, 22);
+    ctx.fillStyle = TERRAIN_COLORS[terrain].base;
+    ctx.fillRect(14, 98, 14, 14);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(terrainName, 32, 109);
+
+    // Stats at bottom
+    const explored = this.tilesExplored.size;
+    const elapsed = Math.floor((Date.now() - this.startTime) / 1000);
+    const mins = Math.floor(elapsed / 60);
+    const secs = elapsed % 60;
+    const dist = Math.floor(this.distanceTraveled);
+    const statsText = `explored: ${explored} tiles · ${dist}m · ${mins}:${String(secs).padStart(2, '0')}`;
+    const stw = ctx.measureText(statsText).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(10, h - 35, stw + 16, 25);
+    ctx.fillStyle = '#ccc';
+    ctx.fillText(statsText, 18, h - 18);
+
+    // Seed
+    const seedText = `seed: ${this.seed}`;
+    const sdw = ctx.measureText(seedText).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(w - sdw - 26, h - 35, sdw + 16, 25);
+    ctx.fillStyle = '#999';
+    ctx.fillText(seedText, w - sdw - 18, h - 18);
+
+    // Speed indicator
+    if (this.keys['ShiftLeft'] || this.keys['ShiftRight']) {
+      ctx.fillStyle = 'rgba(255,200,50,0.7)';
+      ctx.fillText('🏃 sprint', 18, h - 48);
+    }
+  }
+
+  getTimeIcon() {
+    const t = this.renderer.timeOfDay;
+    if (t < 0.25 || t > 0.8) return '🌙';
+    if (t < 0.35) return '🌅';
+    if (t < 0.65) return '☀️';
+    return '🌇';
+  }
+
+  getTerrainName(terrain) {
+    const names = {
+      [TERRAIN.DEEP_WATER]: 'Deep Water',
+      [TERRAIN.WATER]: 'Water',
+      [TERRAIN.SAND]: 'Sand',
+      [TERRAIN.GRASS]: 'Grassland',
+      [TERRAIN.TALL_GRASS]: 'Tall Grass',
+      [TERRAIN.FOREST]: 'Forest',
+      [TERRAIN.DENSE_FOREST]: 'Dense Forest',
+      [TERRAIN.HILL]: 'Hills',
+      [TERRAIN.MOUNTAIN]: 'Mountain',
+      [TERRAIN.SNOW]: 'Snowfield',
+      [TERRAIN.ROAD]: 'Road',
+      [TERRAIN.VILLAGE]: 'Village',
+      [TERRAIN.BRIDGE]: 'Bridge',
+      [TERRAIN.FIELD]: 'Farmland',
+      [TERRAIN.FLOWER]: 'Flower Meadow',
+    };
+    return names[terrain] || 'Unknown';
+  }
+
+  drawHelp(ctx) {
+    if (!this.showHelp) return;
+
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+
+    // Overlay
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.fillRect(0, 0, w, h);
+
+    // Help box
+    const bw = 340;
+    const bh = 400;
+    const bx = (w - bw) / 2;
+    const by = (h - bh) / 2;
+
+    ctx.fillStyle = 'rgba(20,20,40,0.95)';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.strokeStyle = 'rgba(100,140,200,0.5)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bx, by, bw, bh);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 18px monospace';
+    ctx.fillText('🗺 Wanderer', bx + 20, by + 35);
+
+    ctx.font = '12px monospace';
+    ctx.fillStyle = '#aab';
+    const lines = [
+      '',
+      'An infinite procedurally generated',
+      'pixel world. No goals — just explore.',
+      '',
+      '─── Controls ───',
+      '',
+      'WASD / Arrows    Move',
+      'Shift            Sprint',
+      'M                Toggle minimap',
+      'H                Toggle HUD',
+      'P                Pause time',
+      'F                Fullscreen',
+      'R                New random world',
+      '+ / -            Zoom in/out',
+      '[ / ]            Time speed ±',
+      'Esc              This help',
+      '',
+      '─── Touch ───',
+      '',
+      'Drag to move. Far drag = sprint.',
+      '',
+      `Seed: ${this.seed}`,
+      'Share your seed to share your world!'
+    ];
+
+    let ly = by + 55;
+    for (const line of lines) {
+      ctx.fillText(line, bx + 20, ly);
+      ly += 16;
+    }
+  }
+
+  drawPauseIndicator(ctx) {
+    if (!this.paused) return;
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText('⏸ PAUSED', window.innerWidth / 2 - 35, 25);
+  }
+
+  loop() {
+    this.update();
+    this.renderer.render(this.player.x, this.player.y);
+
+    const ctx = this.renderer.ctx;
+    this.drawMinimap(ctx);
+    this.drawHUD(ctx);
+    this.drawHelp(ctx);
+    this.drawPauseIndicator(ctx);
+
+    requestAnimationFrame(() => this.loop());
+  }
+}
+
+</script>
+
+  <script>
+    // Hide loading screen and start
+    window.addEventListener('load', () => {
+      const game = new Game();
+      setTimeout(() => {
+        const loading = document.getElementById('loading');
+        loading.style.opacity = '0';
+        setTimeout(() => loading.style.display = 'none', 500);
+      }, 800);
+    });
+  </script>
+</body>
+</html>
